@@ -3,81 +3,232 @@
 import { useState } from "react";
 
 export default function Page() {
-  const [input, setInput] = useState("");
-  const [addresses, setAddresses] = useState<
-    { text: string; valid: boolean | null }[]
-  >([]);
+  const [direcciones, setDirecciones] = useState("");
+  const [inicio, setInicio] = useState("");
+  const [fin, setFin] = useState("");
+  const [resultado, setResultado] = useState<string[]>([]);
+  const [googleLink, setGoogleLink] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [validaciones, setValidaciones] = useState<{ [key: string]: boolean | null }>({});
 
-  // Detecta cuando escribís una nueva línea
-  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const value = e.target.value;
-    setInput(value);
-
-    const lines = value
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-
-    // Para cada línea hacemos validación en vivo
-    Promise.all(lines.map((line) => validateAddress(line))).then((results) => {
-      setAddresses(
-        lines.map((line, i) => ({ text: line, valid: results[i] }))
-      );
-    });
-  };
-
-  // Función que consulta Nominatim (gratis)
-  const validateAddress = async (address: string): Promise<boolean> => {
+  // Validar dirección en Nominatim
+  const validarDireccion = async (direccion: string) => {
+    if (!direccion.trim()) return null;
     try {
       const res = await fetch(
         `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
-          address + ", Buenos Aires, Argentina"
-        )}`
+          direccion
+        )}&addressdetails=1`
       );
       const data = await res.json();
-      return data.length > 0; // true si encontró la dirección
-    } catch (err) {
+      return data.length > 0;
+    } catch {
       return false;
     }
   };
 
+  // Cada vez que el usuario escribe, validamos todas las direcciones
+  const handleDireccionesChange = async (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    setDirecciones(value);
+
+    const lineas = value.split("\n").map((d) => d.trim()).filter(Boolean);
+
+    const resultados = await Promise.all(lineas.map((d) => validarDireccion(d)));
+
+    const estado: { [key: string]: boolean | null } = {};
+    lineas.forEach((linea, i) => {
+      estado[linea] = resultados[i];
+    });
+
+    setValidaciones(estado);
+  };
+
+  const obtenerCoordenadas = async (direccion: string) => {
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+          direccion
+        )}&addressdetails=1`
+      );
+      const data = await res.json();
+      return data[0] ? [parseFloat(data[0].lat), parseFloat(data[0].lon)] : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const calcularDistancia = ([lat1, lon1]: number[], [lat2, lon2]: number[]) => {
+    const R = 6371;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLon = ((lon2 - lon1) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos((lat1 * Math.PI) / 180) *
+        Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLon / 2) ** 2;
+    return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+  };
+
+  const calcularRuta = async () => {
+    if (!inicio.trim() || !fin.trim()) {
+      alert("Por favor completá punto de inicio y destino final.");
+      return;
+    }
+
+    setLoading(true);
+
+    const puntos = [
+      { tipo: "inicio", direccion: inicio.trim() },
+      ...direcciones
+        .split("\n")
+        .map((d) => d.trim())
+        .filter(Boolean)
+        .map((direccion) => ({ tipo: "intermedia", direccion })),
+      { tipo: "fin", direccion: fin.trim() },
+    ];
+
+    const puntosConCoord = await Promise.all(
+      puntos.map(async (p) => {
+        const coord = await obtenerCoordenadas(p.direccion);
+        return coord ? { ...p, coord } : null;
+      })
+    );
+
+    const validos = puntosConCoord.filter(Boolean) as {
+      tipo: string;
+      direccion: string;
+      coord: number[];
+    }[];
+
+    const inicioCoord = validos.find((p) => p.tipo === "inicio");
+    const finCoord = validos.find((p) => p.tipo === "fin");
+
+    if (!inicioCoord || !finCoord) {
+      alert("No se pudieron obtener coordenadas válidas para inicio o fin.");
+      setLoading(false);
+      return;
+    }
+
+    const intermedias = validos.filter((p) => p.tipo === "intermedia");
+
+    let ordenadas: typeof intermedias = [];
+    let actual = inicioCoord;
+    let restantes = [...intermedias];
+    while (restantes.length > 0) {
+      restantes.sort(
+        (a, b) =>
+          calcularDistancia(actual.coord, a.coord) - calcularDistancia(actual.coord, b.coord)
+      );
+      const siguiente = restantes.shift()!;
+      ordenadas.push(siguiente);
+      actual = siguiente;
+    }
+
+    const todasOrdenadas = [inicioCoord, ...ordenadas, finCoord];
+
+    const resultadoEtiquetado = todasOrdenadas.map((p, idx) => `${idx + 1}. ${p.direccion}`);
+    setResultado(resultadoEtiquetado);
+
+    const origin = encodeURIComponent(inicioCoord.direccion);
+    const destination = encodeURIComponent(finCoord.direccion);
+    const waypoints = todasOrdenadas
+      .slice(1, -1)
+      .map((p) => encodeURIComponent(p.direccion))
+      .join("%7C");
+
+    const googleMapsURL = `https://www.google.com/maps/dir/?api=1&travelmode=driving&origin=${origin}&destination=${destination}&waypoints=${waypoints}&avoid=tolls`;
+
+    setGoogleLink(googleMapsURL);
+
+    setLoading(false);
+  };
+
   return (
-    <main className="flex min-h-screen flex-col items-center justify-start p-6 bg-gray-50">
-      <h1 className="text-2xl font-bold mb-6 text-gray-800">
-        🚚 App Reparto – Optimización de Rutas
+    <div className="p-4 space-y-4 bg-gradient-to-br from-green-600 via-green-800 to-black min-h-screen text-white font-bold">
+      <h1 className="text-3xl text-center mb-4 drop-shadow-lg">
+        🚚 App Reparto - Rutas Inteligentes
       </h1>
 
-      {/* Input de direcciones */}
-      <div className="w-full max-w-2xl">
-        <label className="block text-gray-700 mb-2">
-          Ingresá las direcciones (una por línea):
-        </label>
-        <textarea
-          className="w-full h-40 p-3 border rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-400"
-          value={input}
-          onChange={handleInputChange}
-          placeholder="Ejemplo: Belgrano 893, Quilmes&#10;Zapiola 55A, Bernal"
+      <div className="space-y-3 max-w-xl mx-auto">
+        <input
+          type="text"
+          placeholder="📍 Punto de inicio (ej: Av. Rivadavia 4000)"
+          value={inicio}
+          onChange={(e) => setInicio(e.target.value)}
+          className="w-full p-3 border border-green-400 rounded-xl shadow-md text-black"
         />
+
+        <textarea
+          placeholder="📦 Ingresá las direcciones, una por línea"
+          value={direcciones}
+          onChange={handleDireccionesChange}
+          className="w-full p-3 border border-green-400 rounded-xl shadow-md h-40 text-black"
+        />
+
+        {/* Lista con validación ✔️ ❌ */}
+        <div className="space-y-1">
+          {Object.entries(validaciones).map(([linea, estado], i) => (
+            <div
+              key={i}
+              className="flex justify-between items-center bg-white text-green-800 rounded-md p-2 shadow"
+            >
+              <span>{linea}</span>
+              {estado === null ? (
+                <span className="text-gray-400">⏳</span>
+              ) : estado ? (
+                <span className="text-green-600 font-bold">✔️</span>
+              ) : (
+                <span className="text-red-600 font-bold">❌</span>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <input
+          type="text"
+          placeholder="🏠 Destino final (ej: Calle Falsa 123)"
+          value={fin}
+          onChange={(e) => setFin(e.target.value)}
+          className="w-full p-3 border border-green-400 rounded-xl shadow-md text-black"
+        />
+
+        <button
+          onClick={calcularRuta}
+          className="bg-white text-green-800 px-6 py-3 rounded-xl hover:bg-green-200 shadow-lg w-full"
+          disabled={loading}
+        >
+          {loading ? "Calculando ruta..." : "🚀 Calcular Ruta Inteligente"}
+        </button>
       </div>
 
-      {/* Lista de direcciones validadas */}
-      <div className="w-full max-w-2xl mt-6 space-y-2">
-        {addresses.map((addr, i) => (
-          <div
-            key={i}
-            className="flex items-center justify-between p-2 border rounded-md bg-white shadow-sm"
-          >
-            <span>{addr.text}</span>
-            {addr.valid === null ? (
-              <span className="text-gray-400">⏳</span>
-            ) : addr.valid ? (
-              <span className="text-green-600 font-bold">✔️ Válida</span>
-            ) : (
-              <span className="text-red-600 font-bold">❌ No encontrada</span>
-            )}
+      {loading && (
+        <div className="max-w-xl mx-auto mt-4 text-center text-white font-semibold">
+          <div className="w-full bg-green-300 rounded-full h-2.5 mb-4 overflow-hidden">
+            <div className="bg-green-600 h-2.5 animate-pulse w-full"></div>
           </div>
-        ))}
-      </div>
-    </main>
+          Procesando las direcciones, por favor espera...
+        </div>
+      )}
+
+      {resultado.length > 0 && !loading && (
+        <div className="space-y-4 max-w-xl mx-auto bg-white text-green-800 rounded-xl p-4 shadow-lg border border-green-400 font-bold">
+          <h2 className="text-xl">🗺️ Paradas ordenadas:</h2>
+          <ul className="list-disc list-inside">
+            {resultado.map((r, i) => (
+              <li key={i}>{r}</li>
+            ))}
+          </ul>
+          <a
+            href={googleLink}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline block"
+          >
+            🌐 Ver ruta optimizada en Google Maps ↗
+          </a>
+        </div>
+      )}
+    </div>
   );
 }
